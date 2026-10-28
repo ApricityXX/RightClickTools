@@ -9,6 +9,43 @@
 
 ---
 
+## 用 AI 一键安装（推荐）
+
+把下面这段提示词整段复制给你的 AI 助手（WorkBuddy / Claude Code / Cursor 等），它会替你完成克隆、编译、安装、注册扩展的全过程：
+
+````text
+请在这台 Mac 上帮我安装并启用开源工具「右键工具箱 / RightClickTools」，全程自己执行命令，不要只给我步骤。
+
+执行顺序：
+1. 环境检查：必须是 macOS 13+ 且为 Apple Silicon；运行 xcode-select -p，若报错就先 xcode-select --install（只需要命令行工具，不需要完整 Xcode）。
+2. 克隆：git clone https://github.com/ApricityXX/RightClickTools.git ~/RightClickTools
+3. 编译：cd ~/RightClickTools && bash build.sh   产物在 build/右键工具箱.app
+4. 关闭旧实例并安装到 /Applications（路径必须是 /Applications，不能放下载目录）：
+   pkill -f RightClickTools; rm -rf "/Applications/右键工具箱.app"; cp -R "build/右键工具箱.app" /Applications/
+5. 去掉隔离属性（避免 Gatekeeper 拦截）：xattr -dr com.apple.quarantine "/Applications/右键工具箱.app"
+6. 打开一次 App，让它安装功能脚本：open "/Applications/右键工具箱.app"，等 3 秒；
+   然后确认 ~/Library/Application Scripts/com.user.rightclicktools.RightClickToolsExt/helper.sh 存在且可执行，否则手动 chmod +x 该文件。
+7. 注册并重启访达：
+   pluginkit -a "/Applications/右键工具箱.app/Contents/PlugIns/RightClickToolsExt.appex"; killall Finder
+8. 最后提醒我到「系统设置 → 通用 → 登录项与扩展 → 访达扩展」里勾选「右键工具箱」，这一步需要我手动点。
+
+已知的坑（逐条自查，别跳过）：
+- 扩展没有 com.apple.security.app-sandbox entitlement 时，系统设置里根本看不到它。build.sh 已内置该签名步骤，如果你手动重签，务必保留 --entitlements，别用裸 codesign。
+- 扩展处在沙箱内，NSTask 执行 shell 会被系统拒绝，所有功能都靠 NSUserScriptTask 调用 helper.sh。helper.sh 必须位于 ~/Library/Application Scripts/com.user.rightclicktools.RightClickToolsExt/ 且可执行，否则表现为「菜单能出来但点了没反应」。
+- 不要用 sudo 跑 build.sh，会把产物属主改成 root，后续签名和写入日志会失败。
+- App 名带中文，所有路径在 shell 里都要加引号，否则会被拆词。
+- build.sh 只编译 arm64；Intel Mac 需要把 -arch arm64 改成 -arch x86_64。
+- 使用 ad-hoc 签名且未公证：每次重新编译安装后，都要在系统设置里重新勾选一次扩展。
+- 如果本机装了「超级右键」iRightMouse 等同类工具，先退出，它的右键菜单会和本工具抢同一层级。
+- 安装完不要立刻重复 open 多次，容易起多个管理台实例，先 pkill -f RightClickTools 再开。
+
+验收标准：任意文件夹空白处右键出现「右键工具箱」子菜单；管理台状态栏两个状态都是 ✅ 已启用 / ✅ 已安装。
+若点击无反应：在管理台打开「记录诊断日志」，再右键使用一次，然后读
+~/Library/Containers/com.user.rightclicktools.RightClickToolsExt/Data/tmp/rc_log.txt 定位。
+````
+
+---
+
 ## 功能
 
 | 功能 | 说明 |
