@@ -1,0 +1,103 @@
+name: Release
+
+# push 形如 v1.2.1 的 tag 时，自动编译 arm64 包并发布到 Releases
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 arm64 并发布
+    runs-on: macos-14          # Apple Silicon 运行器
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version || true
+
+      # 版本号以 tag 为唯一来源，宿主与扩展的 plist 一起改写，杜绝两处不一致
+      - name: 注入版本号（tag → plist）
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          chmod +x set_version.sh
+          bash set_version.sh "$VER" "${{ github.run_number }}"
+          echo "注入版本: $VER (${{ github.run_number }})"
+
+      - name: 编译
+        run: |
+          chmod +x build.sh
+          ARCH=arm64 bash build.sh
+          # 校验产物确实存在且是 arm64
+          lipo -archs "build/右键工具箱.app/Contents/MacOS/RightClickTools"
+          lipo -archs "build/右键工具箱.app/Contents/PlugIns/RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt"
+
+      # 运行器是 macOS 14+，若不带 -mmacosx-version-min，minos 会等于构建机系统版本，
+      # 用户在 macOS 13 上打开会报 -10825 kLSIncompatibleSystemVersionErr
+      - name: 校验部署目标（minos ≤ 13.0）
+        run: |
+          for BIN in \
+            "build/右键工具箱.app/Contents/MacOS/RightClickTools" \
+            "build/右键工具箱.app/Contents/PlugIns/RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt"; do
+            MINOS=$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')
+            echo "$(basename "$BIN") → minos=$MINOS"
+            [ "$MINOS" = "13.0" ] || { echo "❌ minos 应为 13.0，实际 $MINOS；高版本系统上编出来的包无法在 macOS 13 运行"; exit 1; }
+          done
+          echo "✅ 部署目标正确"
+
+      - name: 校验注入后的版本号
+        run: |
+          APP="build/右键工具箱.app"
+          EXT="$APP/Contents/PlugIns/RightClickToolsExt.appex"
+          APP_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          EXT_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$EXT/Contents/Info.plist")
+          EXPECT="${GITHUB_REF_NAME#v}"
+          echo "宿主: $APP_VER / 扩展: $EXT_VER / 期望: $EXPECT"
+          [ "$APP_VER" = "$EXPECT" ] || { echo "❌ 宿主版本与 tag 不一致"; exit 1; }
+          [ "$EXT_VER" = "$EXPECT" ] || { echo "❌ 扩展版本与 tag 不一致"; exit 1; }
+          echo "✅ 版本号注入正确"
+
+      - name: 打包 zip
+        id: pack
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          cd build
+          ditto -c -k --sequesterRsrc --keepParent "右键工具箱.app" "RightClickTools-${VER}-arm64.zip"
+          shasum -a 256 "RightClickTools-${VER}-arm64.zip" > SHA256SUMS.txt
+          echo "zip=RightClickTools-${VER}-arm64.zip" >> "$GITHUB_OUTPUT"
+          cat SHA256SUMS.txt
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 右键工具箱 ${{ github.ref_name }}
+          body: |
+            ## 右键工具箱 ${{ github.ref_name }}
+
+            **系统要求**：macOS 13+ / Apple Silicon（arm64）
+
+            ### 安装
+            1. 下载下方 `RightClickTools-*-arm64.zip`，解压后把「右键工具箱.app」拖到 `/Applications`
+            2. 首次打开前先解除隔离（未公证的应用会被 Gatekeeper 拦截）：
+               ```bash
+               xattr -dr com.apple.quarantine "/Applications/右键工具箱.app"
+               open "/Applications/右键工具箱.app"
+               ```
+            3. 在「系统设置 → 通用 → 登录项与扩展 → 访达扩展」中勾选「右键工具箱」
+            4. 任意文件夹空白处右键即可看到菜单
+
+            > 也可以在 GitHub 网页右上角 Code → Codespaces 里直接跑，或用仓库 README 顶部的 AI 提示词让 AI 帮你装。
+            >
+            > 校验下载完整性：`shasum -a 256 -c SHA256SUMS.txt`
+          files: |
+            build/${{ steps.pack.outputs.zip }}
+            build/SHA256SUMS.txt
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

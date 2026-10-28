@@ -1,0 +1,58 @@
+name: CI
+
+# 每次 push / PR 都编译一遍，保证源码随时可构建（不发布产物）
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: 编译校验
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译
+        run: |
+          chmod +x build.sh
+          ARCH=arm64 bash build.sh
+
+      - name: 校验签名与架构
+        run: |
+          APP="build/右键工具箱.app"
+          codesign --verify --verbose=1 "$APP/Contents/PlugIns/RightClickToolsExt.appex"
+          codesign --verify --verbose=1 "$APP"
+          codesign -d --entitlements - "$APP/Contents/PlugIns/RightClickToolsExt.appex" 2>&1 | grep -q "app-sandbox" \
+            && echo "✅ 扩展带 app-sandbox entitlement" \
+            || (echo "❌ 扩展缺少 app-sandbox entitlement，系统不会收录该扩展" && exit 1)
+          test -x "$APP/Contents/Resources/helper.sh" && echo "✅ helper.sh 可执行"
+          test -f "$APP/Contents/PlugIns/RightClickToolsExt.appex/Contents/Resources/blank.docx" && echo "✅ Office 模板已打包"
+
+      - name: 校验版本号一致
+        run: |
+          HOST=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" resources/Host-Info.plist)
+          EXT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" resources/Ext-Info.plist)
+          echo "宿主 $HOST / 扩展 $EXT"
+          [ "$HOST" = "$EXT" ] || { echo "❌ 宿主与扩展版本号不一致，发版前请用 bash set_version.sh <版本> 统一"; exit 1; }
+          echo "✅ 两处版本号一致"
+
+      - name: 校验部署目标（minos = 13.0）
+        run: |
+          for BIN in \
+            "build/右键工具箱.app/Contents/MacOS/RightClickTools" \
+            "build/右键工具箱.app/Contents/PlugIns/RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt"; do
+            MINOS=$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')
+            echo "$(basename "$BIN") → minos=$MINOS"
+            [ "$MINOS" = "13.0" ] || { echo "❌ minos 应为 13.0，实际 $MINOS"; exit 1; }
+          done
+          echo "✅ 可在 macOS 13 上运行"
+
+      - name: 上传构建产物（仅用于排查）
+        uses: actions/upload-artifact@v4
+        with:
+          name: RightClickTools-arm64-${{ github.sha }}
+          path: build/右键工具箱.app
+          retention-days: 7
