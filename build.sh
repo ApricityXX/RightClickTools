@@ -2,7 +2,16 @@
 # 打包 右键工具箱.app（宿主 + Finder Sync 扩展 + 模板）并签名
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+# SDK 路径自适应：优先环境变量，其次 Command Line Tools，最后退回 xcrun（GitHub Actions 上通常是 Xcode 的 SDK）
+SDK="${SDK:-}"
+if [ -z "$SDK" ]; then
+  if [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk ]; then
+    SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+  else
+    SDK="$(xcrun --show-sdk-path)"
+  fi
+fi
+ARCH="${ARCH:-$(uname -m)}"   # 默认沿用当前机器架构，可用 ARCH=x86_64 覆盖
 APP_NAME="右键工具箱.app"
 EXT_NAME="RightClickToolsExt.appex"
 BUILD="$ROOT/build"
@@ -13,7 +22,7 @@ rm -rf "$BUILD"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$EXT/Contents/MacOS" "$EXT/Contents/Resources"
 
 echo "① 编译宿主程序（管理台 GUI，ARC）"
-clang -arch arm64 -O2 -fobjc-arc -isysroot "$SDK" \
+clang -arch "$ARCH" -O2 -fobjc-arc -isysroot "$SDK" \
   -DUSER_HOME="\"$HOME\"" \
   -framework Foundation -framework AppKit -framework FinderSync \
   "$ROOT/src/HostMain.m" -o "$APP/Contents/MacOS/RightClickTools"
@@ -23,7 +32,7 @@ cp "$ROOT/resources/AppIcon.icns" "$APP/Contents/Resources/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "② 编译 Finder Sync 扩展"
-clang -arch arm64 -O2 -fobjc-arc -isysroot "$SDK" \
+clang -arch "$ARCH" -O2 -fobjc-arc -isysroot "$SDK" \
   -DUSER_HOME="\"$HOME\"" \
   -framework Foundation -framework AppKit -framework FinderSync \
   -Wl,-e,_NSExtensionMain \

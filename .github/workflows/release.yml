@@ -1,0 +1,70 @@
+name: Release
+
+# push 形如 v1.2.1 的 tag 时，自动编译 arm64 包并发布到 Releases
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 arm64 并发布
+    runs-on: macos-14          # Apple Silicon 运行器
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version || true
+
+      - name: 编译
+        run: |
+          chmod +x build.sh
+          ARCH=arm64 bash build.sh
+          # 校验产物确实存在且是 arm64
+          lipo -archs "build/右键工具箱.app/Contents/MacOS/RightClickTools"
+          lipo -archs "build/右键工具箱.app/Contents/PlugIns/RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt"
+
+      - name: 打包 zip
+        id: pack
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          cd build
+          ditto -c -k --sequesterRsrc --keepParent "右键工具箱.app" "RightClickTools-${VER}-arm64.zip"
+          shasum -a 256 "RightClickTools-${VER}-arm64.zip" > SHA256SUMS.txt
+          echo "zip=RightClickTools-${VER}-arm64.zip" >> "$GITHUB_OUTPUT"
+          cat SHA256SUMS.txt
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 右键工具箱 ${{ github.ref_name }}
+          body: |
+            ## 右键工具箱 ${{ github.ref_name }}
+
+            **系统要求**：macOS 13+ / Apple Silicon（arm64）
+
+            ### 安装
+            1. 下载下方 `RightClickTools-*-arm64.zip`，解压后把「右键工具箱.app」拖到 `/Applications`
+            2. 首次打开前先解除隔离（未公证的应用会被 Gatekeeper 拦截）：
+               ```bash
+               xattr -dr com.apple.quarantine "/Applications/右键工具箱.app"
+               open "/Applications/右键工具箱.app"
+               ```
+            3. 在「系统设置 → 通用 → 登录项与扩展 → 访达扩展」中勾选「右键工具箱」
+            4. 任意文件夹空白处右键即可看到菜单
+
+            > 也可以在 GitHub 网页右上角 Code → Codespaces 里直接跑，或用仓库 README 顶部的 AI 提示词让 AI 帮你装。
+            >
+            > 校验下载完整性：`shasum -a 256 -c SHA256SUMS.txt`
+          files: |
+            build/${{ steps.pack.outputs.zip }}
+            build/SHA256SUMS.txt
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
