@@ -1,11 +1,34 @@
 # 右键工具箱 · RightClickTools
 
+[![Release](https://github.com/ApricityXX/RightClickTools/actions/workflows/release.yml/badge.svg)](https://github.com/ApricityXX/RightClickTools/actions/workflows/release.yml)
+[![CI](https://github.com/ApricityXX/RightClickTools/actions/workflows/ci.yml/badge.svg)](https://github.com/ApricityXX/RightClickTools/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/ApricityXX/RightClickTools)](https://github.com/ApricityXX/RightClickTools/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 一个为 macOS Finder 补齐右键菜单的轻量工具：新建文档、打开终端、复制路径、校验哈希、显示隐藏文件……
 **没有后台常驻进程，不轮询，不联网**，只在右键那一刻干活。
 
 ![管理台](docs/screenshot.png)
 
 > 纯 Objective-C 实现（无第三方依赖、无 Xcode 工程），一条 `build.sh` 出包。
+
+---
+
+## 直接下载安装（不会敲命令选这个）
+
+到 [Releases](https://github.com/ApricityXX/RightClickTools/releases/latest) 下载 `RightClickTools-<版本>-arm64.zip`：
+
+```bash
+# 1. 解压后把 App 拖进 /Applications，然后解除隔离（未公证，必须做）
+xattr -dr com.apple.quarantine "/Applications/右键工具箱.app"
+open "/Applications/右键工具箱.app"
+
+# 2. 系统设置 → 通用 → 登录项与扩展 → 访达扩展 → 勾选「右键工具箱」
+```
+
+校验下载完整性：`shasum -a 256 -c SHA256SUMS.txt`（与 zip 同目录）。
+
+<!-- 发行流程：打 tag 即出包 —— git tag -a v1.2.2 -m "说明" && git push origin v1.2.2 -->
 
 ---
 
