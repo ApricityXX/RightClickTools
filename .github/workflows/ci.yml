@@ -31,6 +31,14 @@ jobs:
           test -x "$APP/Contents/Resources/helper.sh" && echo "✅ helper.sh 可执行"
           test -f "$APP/Contents/PlugIns/RightClickToolsExt.appex/Contents/Resources/blank.docx" && echo "✅ Office 模板已打包"
 
+      - name: 校验版本号一致
+        run: |
+          HOST=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" resources/Host-Info.plist)
+          EXT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" resources/Ext-Info.plist)
+          echo "宿主 $HOST / 扩展 $EXT"
+          [ "$HOST" = "$EXT" ] || { echo "❌ 宿主与扩展版本号不一致，发版前请用 bash set_version.sh <版本> 统一"; exit 1; }
+          echo "✅ 两处版本号一致"
+
       - name: 上传构建产物（仅用于排查）
         uses: actions/upload-artifact@v4
         with:
