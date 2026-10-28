@@ -39,6 +39,17 @@ jobs:
           [ "$HOST" = "$EXT" ] || { echo "❌ 宿主与扩展版本号不一致，发版前请用 bash set_version.sh <版本> 统一"; exit 1; }
           echo "✅ 两处版本号一致"
 
+      - name: 校验部署目标（minos = 13.0）
+        run: |
+          for BIN in \
+            "build/右键工具箱.app/Contents/MacOS/RightClickTools" \
+            "build/右键工具箱.app/Contents/PlugIns/RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt"; do
+            MINOS=$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')
+            echo "$(basename "$BIN") → minos=$MINOS"
+            [ "$MINOS" = "13.0" ] || { echo "❌ minos 应为 13.0，实际 $MINOS"; exit 1; }
+          done
+          echo "✅ 可在 macOS 13 上运行"
+
       - name: 上传构建产物（仅用于排查）
         uses: actions/upload-artifact@v4
         with:

@@ -87,8 +87,10 @@ open "/Applications/右键工具箱.app"
 ## 系统要求
 
 - macOS 13 Ventura 及以上
-- Apple Silicon（`build.sh` 编译 arm64；Intel 需自行把 `-arch arm64` 改成 `-arch x86_64`）
+- Apple Silicon（`build.sh` 编译 arm64；Intel 需 `ARCH=x86_64 bash build.sh`）
 - 命令行工具（`xcode-select --install`），无需完整 Xcode
+
+> 编译时固定 `-mmacosx-version-min=13.0`（可用 `MACOS_MIN=` 覆盖）。不加这个参数，在 macOS 14/15 的构建机上编出来的二进制 `minos` 会等于构建机系统版本，在 macOS 13 上打开会报 `-10825 kLSIncompatibleSystemVersionErr`。CI 会校验产物 `minos`，不一致直接失败。
 
 ## 编译与安装
 

@@ -12,6 +12,9 @@ if [ -z "$SDK" ]; then
   fi
 fi
 ARCH="${ARCH:-$(uname -m)}"   # 默认沿用当前机器架构，可用 ARCH=x86_64 覆盖
+# 部署目标必须显式指定：否则 CI 在 macOS 14/15 运行器上编译出的二进制 minos 会等于构建机系统版本，
+# 在更低版本 macOS 上打开会报 -10825 kLSIncompatibleSystemVersionErr
+MACOS_MIN="${MACOS_MIN:-13.0}"
 APP_NAME="右键工具箱.app"
 EXT_NAME="RightClickToolsExt.appex"
 BUILD="$ROOT/build"
@@ -22,7 +25,7 @@ rm -rf "$BUILD"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$EXT/Contents/MacOS" "$EXT/Contents/Resources"
 
 echo "① 编译宿主程序（管理台 GUI，ARC）"
-clang -arch "$ARCH" -O2 -fobjc-arc -isysroot "$SDK" \
+clang -arch "$ARCH" -mmacosx-version-min="$MACOS_MIN" -O2 -fobjc-arc -isysroot "$SDK" \
   -DUSER_HOME="\"$HOME\"" \
   -framework Foundation -framework AppKit -framework FinderSync \
   "$ROOT/src/HostMain.m" -o "$APP/Contents/MacOS/RightClickTools"
@@ -32,7 +35,7 @@ cp "$ROOT/resources/AppIcon.icns" "$APP/Contents/Resources/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "② 编译 Finder Sync 扩展"
-clang -arch "$ARCH" -O2 -fobjc-arc -isysroot "$SDK" \
+clang -arch "$ARCH" -mmacosx-version-min="$MACOS_MIN" -O2 -fobjc-arc -isysroot "$SDK" \
   -DUSER_HOME="\"$HOME\"" \
   -framework Foundation -framework AppKit -framework FinderSync \
   -Wl,-e,_NSExtensionMain \

@@ -39,6 +39,19 @@ jobs:
           lipo -archs "build/右键工具箱.app/Contents/MacOS/RightClickTools"
           lipo -archs "build/右键工具箱.app/Contents/PlugIns/RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt"
 
+      # 运行器是 macOS 14+，若不带 -mmacosx-version-min，minos 会等于构建机系统版本，
+      # 用户在 macOS 13 上打开会报 -10825 kLSIncompatibleSystemVersionErr
+      - name: 校验部署目标（minos ≤ 13.0）
+        run: |
+          for BIN in \
+            "build/右键工具箱.app/Contents/MacOS/RightClickTools" \
+            "build/右键工具箱.app/Contents/PlugIns/RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt"; do
+            MINOS=$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')
+            echo "$(basename "$BIN") → minos=$MINOS"
+            [ "$MINOS" = "13.0" ] || { echo "❌ minos 应为 13.0，实际 $MINOS；高版本系统上编出来的包无法在 macOS 13 运行"; exit 1; }
+          done
+          echo "✅ 部署目标正确"
+
       - name: 校验注入后的版本号
         run: |
           APP="build/右键工具箱.app"
