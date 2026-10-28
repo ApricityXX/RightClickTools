@@ -24,42 +24,7 @@ xattr -dr com.apple.quarantine "/Applications/右键工具箱.app"
 open "/Applications/右键工具箱.app"
 ```
 
-### 方式二：自己编译
-
-需要 macOS 13+、Apple Silicon、命令行工具（`xcode-select --install`，不用完整 Xcode）。
-
-```bash
-git clone git@github.com:ApricityXX/RightClickTools.git
-cd RightClickTools
-bash build.sh                          # 产物：build/右键工具箱.app
-cp -R build/右键工具箱.app /Applications/
-open "/Applications/右键工具箱.app"
-```
-
-Intel 机器用 `ARCH=x86_64 bash build.sh`。
-
-> `build.sh` 固定 `-mmacosx-version-min=13.0`，否则在高版本系统上编出的包在 macOS 13 上会报 `-10825 kLSIncompatibleSystemVersionErr`。可用 `MACOS_MIN=` 覆盖。
-
-### 最后一步：启用扩展
-
-**系统设置 → 通用 → 登录项与扩展 → 访达扩展**，勾选「右键工具箱」（部分系统在「隐私与安全性 → 扩展」）。
-
-之后在访达任意位置右键，就能看到「右键工具箱」子菜单。
-
-## 功能
-
-| 功能 | 说明 |
-| --- | --- |
-| 新建文件（子菜单） | `txt` / `md` / `docx` / `xlsx` / `pptx`，重名自动加序号，创建后自动选中 |
-| 在此处打开终端 | 定位到当前目录 |
-| 复制文件路径 / 文件名 | 支持多选，换行拼接 |
-| 复制 MD5 / SHA256 | 两个值一起算，直接进剪贴板 |
-| 用 VS Code / Typora 打开 | 装了才出现 |
-| 显示 / 隐藏隐藏文件 | 切换 `AppleShowAllFiles`，会自动重启访达 |
-
-每项都能在**管理台**里单独开关，关掉的不出现在菜单里。管理台还负责：查看扩展与脚本安装状态、开关诊断日志（默认关）、一键重装功能脚本、快速跳转系统扩展设置。
-
-## 用 AI 一键安装（可选）
+### 方式二：让 AI 帮你装
 
 不想自己敲命令，把下面整段丢给 AI 助手，让它全程代劳：
 
@@ -88,6 +53,41 @@ Intel 机器用 `ARCH=x86_64 bash build.sh`。
 验收：任意文件夹右键出现「右键工具箱」子菜单。若点击无反应，在管理台打开「记录诊断日志」再试一次，然后看
 ~/Library/Containers/com.user.rightclicktools.RightClickToolsExt/Data/tmp/rc_log.txt
 ````
+
+### 方式三：自己编译
+
+需要 macOS 13+、Apple Silicon、命令行工具（`xcode-select --install`，不用完整 Xcode）。
+
+```bash
+git clone git@github.com:ApricityXX/RightClickTools.git
+cd RightClickTools
+bash build.sh                          # 产物：build/右键工具箱.app
+cp -R build/右键工具箱.app /Applications/
+open "/Applications/右键工具箱.app"
+```
+
+Intel 机器用 `ARCH=x86_64 bash build.sh`。
+
+> `build.sh` 固定 `-mmacosx-version-min=13.0`，否则在高版本系统上编出的包在 macOS 13 上会报 `-10825 kLSIncompatibleSystemVersionErr`。可用 `MACOS_MIN=` 覆盖。
+
+### 三种方式都必经：启用扩展
+
+装好之后，**系统设置 → 通用 → 登录项与扩展 → 访达扩展**，勾选「右键工具箱」（部分系统在「隐私与安全性 → 扩展」）。
+
+之后在访达任意位置右键，就能看到「右键工具箱」子菜单。
+
+## 功能
+
+| 功能 | 说明 |
+| --- | --- |
+| 新建文件（子菜单） | `txt` / `md` / `docx` / `xlsx` / `pptx`，重名自动加序号，创建后自动选中 |
+| 在此处打开终端 | 定位到当前目录 |
+| 复制文件路径 / 文件名 | 支持多选，换行拼接 |
+| 复制 MD5 / SHA256 | 两个值一起算，直接进剪贴板 |
+| 用 VS Code / Typora 打开 | 装了才出现 |
+| 显示 / 隐藏隐藏文件 | 切换 `AppleShowAllFiles`，会自动重启访达 |
+
+每项都能在**管理台**里单独开关，关掉的不出现在菜单里。管理台还负责：查看扩展与脚本安装状态、开关诊断日志（默认关）、一键重装功能脚本、快速跳转系统扩展设置。
 
 ## 常见问题
 
