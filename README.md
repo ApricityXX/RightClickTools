@@ -108,6 +108,20 @@ open /Applications/右键工具箱.app
 
 之后在访达任意位置右键，即可看到「右键工具箱」菜单。
 
+## 发版
+
+版本号以 **git tag 为唯一来源**，CI 会自动写进宿主与扩展的 `Info.plist`，不需要手工改：
+
+```bash
+git tag -a v1.2.2 -m "本次改动说明"
+git push origin v1.2.2
+```
+
+推送后 `Release` workflow 会自动：注入版本号 → 编译 arm64 → 校验产物版本与 tag 一致 → 打包 zip + SHA256SUMS → 发布 Release。
+tag 里带 `-`（如 `v1.2.2-beta.1`）会自动标为 prerelease，不会顶掉「Latest」。
+
+本地想手动改版本号时用 `bash set_version.sh 1.2.2 [build号]`，它同时改写两个 plist；`CI` workflow 会检查两处版本是否一致。
+
 ## 界面
 
 管理台是宿主 App 的主窗口，用来：
