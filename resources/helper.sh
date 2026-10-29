@@ -3,6 +3,11 @@
 # 由 Finder Sync 扩展通过 NSUserScriptTask 调用（沙箱内允许执行本目录脚本，且脚本不受沙箱限制）
 # 职责：读取扩展写好的命令文件并执行，把输出回写到扩展容器
 
+# 扩展进程继承的环境里没有 LANG，pbcopy / echo 会按 C 语言（MacRoman）处理中文，
+# 粘出来就是「Êñá‰ª∂」这种乱码。必须显式声明 UTF-8。
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
 C="$HOME/Library/Containers/com.user.rightclicktools.RightClickToolsExt/Data"
 TMP="$C/tmp"
 LOG="$TMP/rc_log.txt"

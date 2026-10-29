@@ -29,13 +29,42 @@ static NSString *FeatureConfigPath(void)
 // 诊断日志总开关（管理台里控制，默认关；写日志前先查此标志，关闭时零开销）
 static BOOL gLogging = NO;
 
+// 配置快照：一次菜单构建只反序列化一次 features.plist（原来 13 个开关各读一次）
+// 刻意不用「mtime 全局缓存」——那种缓存一旦失效判断写错，会出现「开关拨了菜单不变」
+// 的诡异 bug；这里在每次构建菜单前主动置空，生命周期等于一次菜单构建，无状态残留
+static NSDictionary *gCfgSnapshot = nil;
+
+static NSDictionary *configSnapshot(void)
+{
+    if (!gCfgSnapshot)
+        gCfgSnapshot = [NSDictionary dictionaryWithContentsOfFile:FeatureConfigPath()] ?: @{};
+    return gCfgSnapshot;
+}
+
+static void resetConfigSnapshot(void) { gCfgSnapshot = nil; }
+
 // 返回某功能是否启用（key: newFile/terminal/copyPath/toggleHidden/copyName/
-// verifyHash/openVSCode/openTypora/logging/txt/md/docx/xlsx/pptx）
+// verifyHash/openVSCode/openTypora/copyInfo/logging/txt/md/docx/xlsx/pptx）
 static BOOL featureEnabled(NSString *key)
 {
-    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:FeatureConfigPath()];
-    NSNumber *v = cfg[key];
+    NSNumber *v = configSnapshot()[key];
     return v ? v.boolValue : [key isEqualToString:@"logging"] ? NO : YES;
+}
+
+// 终端应用：存 bundle ID 而不是显示名——显示名会因语言/别名（iTerm.app 显示为 iTerm2）漂移，
+// bundle ID 与安装位置、本地化都无关，配合 /usr/bin/open -b 使用
+static NSString *const kDefaultTerminalID = @"com.apple.Terminal";
+
+static NSString *terminalAppID(void)
+{
+    NSString *v = configSnapshot()[@"terminalApp"];
+    return v.length ? v : kDefaultTerminalID;
+}
+
+static NSString *terminalAppLabel(void)
+{
+    NSString *v = configSnapshot()[@"terminalAppLabel"];
+    return v.length ? v : @"终端";
 }
 
 // 日志超过 256KB 时自动截断保留尾部（每次右键建菜单时检查一次，开销可忽略）
@@ -106,7 +135,7 @@ static NSString *shq(NSString *s)
             @"pptx" : @"新建PPT演示文稿",
         };
         gLogging = featureEnabled(@"logging");
-        rcLog(@"[init] 扩展启动（v6 开关管理版）");
+        rcLog(@"[init] 扩展启动（v7）");
     }
     return self;
 }
@@ -118,7 +147,11 @@ static NSString *shq(NSString *s)
 {
     NSString *tmpDir = [NSHomeDirectory() stringByAppendingPathComponent:@"tmp"];
     NSString *cmdPath = [tmpDir stringByAppendingPathComponent:@"rc_cmd.sh"];
-    [shellCommands writeToFile:cmdPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // 前置 UTF-8 声明：扩展进程的环境里没有 LANG，pbcopy 会把中文当 MacRoman 重编码，
+    // 粘贴出来是「Êñá‰ª∂」这类乱码。helper.sh 里也有一份，这里再兜一次底（防止旧版 helper 未更新）
+    NSString *head = @"export LANG=en_US.UTF-8\nexport LC_ALL=en_US.UTF-8\n";
+    [[head stringByAppendingString:shellCommands]
+        writeToFile:cmdPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
     // helper.sh 的两个候选位置：容器内映射路径 / 真实用户目录
     NSArray<NSString *> *candidates = @[
@@ -224,7 +257,8 @@ static NSString *shq(NSString *s)
 {
     if (kind == FIMenuKindContextualMenuForSidebar) return nil;
 
-    // 每次右键：刷新日志开关 + 防膨胀截断（仅此两次轻量操作，无后台开销）
+    // 每次右键：重读配置（整个菜单构建只反序列化一次 plist）+ 刷新日志开关 + 防膨胀截断
+    resetConfigSnapshot();
     gLogging = featureEnabled(@"logging");
     trimLogIfNeeded();
 
@@ -268,7 +302,7 @@ static NSString *shq(NSString *s)
 
     // —— 其余功能项（按功能开关过滤） ——
     if (featureEnabled(@"terminal"))
-        [menu addItem:[self item:@"在此处打开终端" action:@selector(openTerminal:)
+        [menu addItem:[self item:[self terminalMenuTitle] action:@selector(openTerminal:)
                             icon:[RightClickSync symbolIcon:@"terminal"]]];
     if (featureEnabled(@"copyPath"))
         [menu addItem:[self item:@"复制文件路径" action:@selector(copyPath:)
@@ -276,6 +310,9 @@ static NSString *shq(NSString *s)
     if (featureEnabled(@"copyName"))
         [menu addItem:[self item:@"复制文件名" action:@selector(copyName:)
                             icon:[RightClickSync symbolIcon:@"doc.plaintext"]]];
+    if (featureEnabled(@"copyInfo"))
+        [menu addItem:[self item:@"复制文件信息" action:@selector(copyFileInfo:)
+                            icon:[RightClickSync symbolIcon:@"info.circle"]]];
     if (featureEnabled(@"verifyHash"))
         [menu addItem:[self item:@"复制 MD5/SHA256 校验值" action:@selector(verifyHash:)
                             icon:[RightClickSync symbolIcon:@"number"]]];
@@ -316,6 +353,23 @@ static NSString *shq(NSString *s)
         if (isDir) return u;
     }
     return [RightClickSync resolveURL:c.targetedURL];
+}
+
+// 统一取「选中的项」；没选中就取右键目标。避免每个动作各写一遍收集逻辑
+- (NSArray<NSURL *> *)targetURLs
+{
+    FIFinderSyncController *c = [FIFinderSyncController defaultController];
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    if (c.selectedItemURLs.count) {
+        for (NSURL *u in c.selectedItemURLs) {
+            NSURL *r = [RightClickSync resolveURL:u];
+            if (r) [urls addObject:r];
+        }
+    } else if (c.targetedURL) {
+        NSURL *r = [RightClickSync resolveURL:c.targetedURL];
+        if (r) [urls addObject:r];
+    }
+    return urls;
 }
 
 #pragma mark - 1. 新建文件
@@ -389,14 +443,34 @@ static NSString *shq(NSString *s)
 
 #pragma mark - 2. 打开终端
 
+// 标题必须跟实际行为一致：配置的终端没装就回退系统终端，此时不要显示"在 xxx 中打开"
+- (NSString *)terminalMenuTitle
+{
+    NSString *app = terminalAppID();
+    if ([app isEqualToString:kDefaultTerminalID]) return @"在此处打开终端";
+    if ([RightClickSync appInstalled:app])
+        return [NSString stringWithFormat:@"在 %@ 中打开", terminalAppLabel()];
+    return @"在此处打开终端";
+}
+
 - (void)openTerminal:(NSMenuItem *)sender
 {
     NSURL *dir = [self targetDir];
-    rcLog([NSString stringWithFormat:@"[openTerminal] dir=%@", dir.path]);
     if (!dir) return;
-    [self runOutOfSandbox:[NSString stringWithFormat:@"/usr/bin/open -a Terminal %@\n",
-                           shq(dir.path)]
-                    label:@"openTerminal"];
+
+    NSString *app = terminalAppID();
+    if (![app isEqualToString:kDefaultTerminalID] && ![RightClickSync appInstalled:app]) {
+        rcLog([NSString stringWithFormat:@"[openTerminal] 配置的终端 %@ 不可用，回退 Terminal", app]);
+        app = kDefaultTerminalID;
+    }
+    rcLog([NSString stringWithFormat:@"[openTerminal] app=%@ dir=%@", app, dir.path]);
+
+    // 双重保险：ObjC 侧已按 appInstalled 回退，shell 侧再用 || 兜一次（例如应用刚被删掉）。
+    // 保留 stderr（不要 2>/dev/null）——open 失败的原因要进 helper 日志才能排查。
+    NSString *cmd = [NSString stringWithFormat:
+        @"/usr/bin/open -b %@ %@ 2>&1 || /usr/bin/open -b %@ %@ 2>&1\n",
+        shq(app), shq(dir.path), shq(kDefaultTerminalID), shq(dir.path)];
+    [self runOutOfSandbox:cmd label:@"openTerminal"];
 }
 
 #pragma mark - 3. 复制路径
@@ -416,11 +490,15 @@ static NSString *shq(NSString *s)
     if (!urls.count) return;
 
     NSString *text = [[urls valueForKey:@"path"] componentsJoinedByString:@"\n"];
+
+    // 只写纯文本，绝对不要 writeObjects:@[NSURL]：
+    // 那样剪贴板项会同时带 public.file-url，微信 / 部分编辑器看到 file-url 就当「文件」处理，
+    // 粘贴时要么变成附件、要么直接失败（复制的是文件夹时尤其明显）。
+    // 「复制文件路径」要的就是一段可粘贴的字符串，类型越单一越好。
     NSPasteboard *pb = [NSPasteboard generalPasteboard];
     [pb clearContents];
-    BOOL ok = [pb writeObjects:urls];
-    [pb setString:text forType:NSPasteboardTypeString];
-    rcLog([NSString stringWithFormat:@"[copyPath] 剪贴板直写=%@", ok ? @"OK" : @"FAIL"]);
+    BOOL ok = [pb setString:text forType:NSPasteboardTypeString];
+    rcLog([NSString stringWithFormat:@"[copyPath] 写剪贴板=%@ text=%@", ok ? @"OK" : @"FAIL", text]);
 
     if (!ok) {
         // 兜底：helper 里用 pbcopy
@@ -450,6 +528,36 @@ static NSString *shq(NSString *s)
     NSPasteboard *pb = [NSPasteboard generalPasteboard];
     [pb clearContents];
     [pb setString:[names componentsJoinedByString:@"\n"] forType:NSPasteboardTypeString];
+}
+
+#pragma mark - 3b2. 复制文件信息（结构化文本）
+
+- (void)copyFileInfo:(NSMenuItem *)sender
+{
+    NSArray<NSURL *> *urls = [self targetURLs];
+    rcLog([NSString stringWithFormat:@"[copyFileInfo] urls=%@", urls]);
+    if (!urls.count) return;
+
+    // 沙箱内 stat 任意路径可能被拒，统一交给 helper.sh（普通用户权限）拼好再进剪贴板
+    NSMutableString *cmd = [NSMutableString stringWithString:@"tmpf=$(mktemp)\n"];
+    [cmd appendString:@"hsz() { awk -v b=\"$1\" 'BEGIN{split(\"B KB MB GB TB\",u,\" \");"
+                      "i=1;while(b>=1024&&i<5){b/=1024;i++}"
+                      "if(i==1)printf \"%d %s\",b,u[i];else printf \"%.1f %s\",b,u[i]}'; }\n"];
+    for (NSURL *u in urls) {
+        [cmd appendFormat:@"f=%@\n", shq(u.path)];
+        [cmd appendString:@"echo \"文件名: $(basename \"$f\")\" >> \"$tmpf\"\n"];
+        [cmd appendString:@"if [ -d \"$f\" ]; then\n"];
+        [cmd appendString:@"  echo \"大小: 文件夹\" >> \"$tmpf\"\n"];
+        [cmd appendString:@"else\n"];
+        [cmd appendString:@"  sz=$(stat -f %z \"$f\")\n"];
+        [cmd appendString:@"  echo \"大小: $(hsz $sz) ($sz 字节)\" >> \"$tmpf\"\n"];
+        [cmd appendString:@"fi\n"];
+        [cmd appendString:@"echo \"修改时间: $(stat -f \"%Sm\" -t \"%Y-%m-%d %H:%M:%S\" \"$f\")\" >> \"$tmpf\"\n"];
+        [cmd appendString:@"echo \"路径: $f\" >> \"$tmpf\"\n"];
+        [cmd appendString:@"echo \"\" >> \"$tmpf\"\n"];
+    }
+    [cmd appendString:@"cat \"$tmpf\" | /usr/bin/pbcopy\nrm -f \"$tmpf\"\n"];
+    [self runOutOfSandbox:cmd label:@"copyFileInfo"];
 }
 
 #pragma mark - 3c. MD5 / SHA256 校验值（结果进剪贴板）
@@ -482,6 +590,10 @@ static NSString *shq(NSString *s)
         [cmd appendString:@"echo \"SHA256 ($n): $s\" >> \"$tmpf\"\n"];
     }
     [cmd appendString:@"cat \"$tmpf\" | /usr/bin/pbcopy\nrm -f \"$tmpf\"\n"];
+    // 大文件哈希要跑几秒到几十秒，完成时给一条系统通知，省得用户不知道好了没
+    [cmd appendString:@"command -v osascript >/dev/null 2>&1 && "
+                      "/usr/bin/osascript -e 'display notification \"校验值已复制到剪贴板\" "
+                      "with title \"右键工具箱\"' >/dev/null 2>&1 || true\n"];
     [self runOutOfSandbox:cmd label:@"verifyHash"];
 }
 
@@ -511,43 +623,22 @@ static NSString *shq(NSString *s)
     [self runOutOfSandbox:cmd label:label];
 }
 
-#pragma mark - 4. 切换隐藏文件
+#pragma mark - 4. 切换隐藏文件（⌘⇧.，不重启访达）
 
-- (BOOL)hiddenFilesShown
-{
-    CFPreferencesAppSynchronize(CFSTR("com.apple.finder"));
-    CFBooleanRef v = CFPreferencesCopyAppValue(CFSTR("AppleShowAllFiles"), CFSTR("com.apple.finder"));
-    BOOL shown = v ? CFBooleanGetValue(v) : NO;
-    if (v) CFRelease(v);
-    return shown;
-}
-
+// Finder Sync 扩展跑在独立的沙箱进程里：既改不了访达的窗口状态，也不能跨进程发按键
+// （跨进程发键要「辅助功能」授权，而扩展没有 UI、弹不出授权框，只能静默失败）。
+// 所以整件事交给宿主 App：用 rightclicktools://toggle-hidden 唤醒它，
+// 由它 activate 访达再模拟 ⌘⇧.。效果和你亲手按快捷键一致——只切换当前窗口、不重启访达。
+// 代价只有一次性的「允许控制 System Events」授权。
 - (NSString *)hiddenToggleTitle
 {
-    return [self hiddenFilesShown] ? @"隐藏所有隐藏文件" : @"显示所有隐藏文件";
+    return @"切换隐藏文件（⌘⇧.）";
 }
 
 - (void)toggleHiddenFiles:(NSMenuItem *)sender
 {
-    BOOL target = ![self hiddenFilesShown];
-    rcLog([NSString stringWithFormat:@"[toggleHidden] target=%@", target ? @"YES" : @"NO"]);
-
-    // 进程内先试（未沙箱时有效）
-    CFPreferencesSetAppValue(CFSTR("AppleShowAllFiles"),
-                             target ? kCFBooleanTrue : kCFBooleanFalse,
-                             CFSTR("com.apple.finder"));
-    CFPreferencesAppSynchronize(CFSTR("com.apple.finder"));
-
-    NSMutableString *cmd = [NSMutableString string];
-    if ([self hiddenFilesShown] != target) {
-        rcLog(@"[toggleHidden] 进程内写入无效，走 helper");
-        [cmd appendFormat:@"/usr/bin/defaults write com.apple.finder AppleShowAllFiles -bool %@\n",
-         target ? @"YES" : @"NO"];
-    } else {
-        rcLog(@"[toggleHidden] 进程内写入成功（但仍需重启 Finder）");
-    }
-    [cmd appendString:@"/usr/bin/killall Finder\n"];
-    [self runOutOfSandbox:cmd label:@"toggleHidden"];
+    rcLog(@"[toggleHidden] 交给宿主模拟 ⌘⇧.");
+    [self runOutOfSandbox:@"/usr/bin/open \"rightclicktools://toggle-hidden\" 2>/dev/null\n"
+                    label:@"toggleHidden"];
 }
-
 @end
