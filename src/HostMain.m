@@ -602,6 +602,7 @@ static BOOL gURLHandled = NO;
 //  ② 激活访达用 NSRunningApplication，不需要「自动化」权限——
 //     所以本功能只依赖「辅助功能」一项权限。
 static BOOL gNeedSlowExit = NO;   // 弹了系统授权框时别 2 秒就退出，否则框会跟着消失
+static BOOL gDidResetTCC = NO;    // 本次运行只清一次失效授权记录，避免反复清
 
 - (BOOL)performHiddenToggleViaKeystroke
 {
@@ -610,9 +611,20 @@ static BOOL gNeedSlowExit = NO;   // 弹了系统授权框时别 2 秒就退出�
         [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.finder"].firstObject;
     [finder activateWithOptions:NSApplicationActivateIgnoringOtherApps];
 
-    // 向系统投递按键需要「辅助功能」。没授权时让系统弹标准引导框
-    // （会把本 App 自动加进列表，只需打开开关），用户点完再点一次菜单即可。
+    // 向系统投递按键需要「辅助功能」。
     if (!AXIsProcessTrusted()) {
+        // 关键：先清掉本 app 在「辅助功能」里的旧记录。
+        // ad-hoc 签名每次重编译 cdhash 都变，旧记录会变成「设置里开关明明开着、
+        // 系统却仍判定未授权」的僵死状态——用户重开开关也没用（开关动的是旧记录）。
+        // 清掉之后系统弹出的引导会重新登记当前这个二进制，用户再打开开关即可生效。
+        if (!gDidResetTCC) {
+            NSString *out = runCmd(@"/usr/bin/tccutil",
+                                   @[@"reset", @"Accessibility", @"com.user.rightclicktools"]);
+            appendLog([NSString stringWithFormat:
+                       @"[隐藏文件切换] 清除失效的辅助功能记录：%@",
+                       out.length ? out : @"已重置"]);
+            gDidResetTCC = YES;
+        }
         NSDictionary *opts = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES};
         AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)opts);
         appendLog(@"[隐藏文件切换] 缺少「辅助功能」权限，已弹出系统引导框");

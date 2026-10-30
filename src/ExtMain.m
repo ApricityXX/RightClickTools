@@ -135,7 +135,7 @@ static NSString *shq(NSString *s)
             @"pptx" : @"新建PPT演示文稿",
         };
         gLogging = featureEnabled(@"logging");
-        rcLog(@"[init] 扩展启动（v7）");
+        rcLog(@"[init] 扩展启动");
     }
     return self;
 }
