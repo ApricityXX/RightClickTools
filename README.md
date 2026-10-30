@@ -10,8 +10,6 @@
 
 ![管理台](docs/screenshot.png)
 
-> 当前版本 **v1.0**（首个正式版）。早期 0.x～1.x 测试版已全部下架，从 v1.0 重新计版本。
-
 ---
 
 ## 安装
@@ -125,6 +123,7 @@ open "/Applications/右键工具箱.app"
 ## 开发
 
 - 目录：`src/`（`ExtMain.m` 扩展、`HostMain.m` 管理台）、`resources/`（plist、`helper.sh`、图标）、`templates/`（Office 空白模板，`make_templates.py` 生成）、`gen_icon.m`（生成 `AppIcon.icns`）
+- 更新日志：[CHANGELOG.md](CHANGELOG.md)
 - 发版：版本号以 git tag 为唯一来源，CI 自动写进两个 plist 并出包
 
   ```bash
