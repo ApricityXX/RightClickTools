@@ -86,7 +86,7 @@ if [ "$1" = "--install" ]; then
 
   # 重新注册：覆盖安装后 bundle 变了（尤其版本号往下走时），LaunchServices 与 pluginkit
   # 里的旧记录会与新 bundle 失配，Finder 就会静默地不加载扩展。这两步是必需的。
-  "$LSREGISTER" -f "$DEST"
+  "$LSREGISTER" -f "$DEST" || true
   pluginkit -a "$DEST/Contents/PlugIns/$EXT_NAME" 2>/dev/null || true
 
   # 重启访达让系统重新扫描扩展（只是关闭并重开访达窗口，不影响文件）
