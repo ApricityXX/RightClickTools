@@ -66,3 +66,32 @@ echo "⑤ 校验"
 codesign --verify --verbose=1 "$EXT" && codesign --verify --verbose=1 "$APP"
 echo
 echo "完成：$APP"
+
+# 用法：
+#   ./build.sh            只构建，产物在 build/右键工具箱.app
+#   ./build.sh --install  构建后覆盖安装到 /Applications 并重新注册扩展
+if [ "$1" = "--install" ]; then
+  DEST="/Applications/$APP_NAME"
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+  echo "⑥ 安装到 $DEST"
+  # 先结束旧进程：旧扩展进程持有的是旧 bundle，直接覆盖会让它变成「失联进程」——
+  # 进程还在、但不再接收 Finder 的菜单请求，表现就是右键一片空白。必须先杀掉。
+  pkill -f "RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt" 2>/dev/null || true
+  pkill -f "/Contents/MacOS/RightClickTools$" 2>/dev/null || true
+  sleep 1
+
+  rm -rf "$DEST"
+  cp -R "$APP" "$DEST"
+
+  # 重新注册：覆盖安装后 bundle 变了（尤其版本号往下走时），LaunchServices 与 pluginkit
+  # 里的旧记录会与新 bundle 失配，Finder 就会静默地不加载扩展。这两步是必需的。
+  "$LSREGISTER" -f "$DEST"
+  pluginkit -a "$DEST/Contents/PlugIns/$EXT_NAME" 2>/dev/null || true
+
+  # 重启访达让系统重新扫描扩展（只是关闭并重开访达窗口，不影响文件）
+  killall Finder 2>/dev/null || true
+
+  echo "已安装：$DEST"
+  echo "若右键仍无菜单，去「系统设置 → 隐私与安全性 → 扩展 → 访达」勾选一次「右键工具箱」。"
+fi
