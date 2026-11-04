@@ -65,6 +65,8 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
 @property(strong) NSMutableDictionary<NSString *, NSButton *> *switches;
 @property(strong) NSTextView *logView;
 @property(strong) NSTimer *timer;
+@property(strong) NSPopUpButton *terminalAppPopup;
+@property(strong) NSTextField *terminalAppCustom;
 @end
 
 @implementation AppDelegate
@@ -111,6 +113,7 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
     for (NSString *k in @[@"txt", @"md", @"docx", @"xlsx", @"pptx"])
         if (!cfg[k]) cfg[k] = @YES;
     if (!cfg[@"logging"]) cfg[@"logging"] = @NO;
+    if (!cfg[@"terminalApp"]) cfg[@"terminalApp"] = @"Terminal";
     return cfg;
 }
 
@@ -118,6 +121,14 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
 {
     NSMutableDictionary *cfg = [self loadConfig];
     for (NSString *k in self.switches) cfg[k] = @(self.switches[k].state == NSControlStateValueOn);
+    // 保存终端应用配置
+    NSString *selected = self.terminalAppPopup.titleOfSelectedItem;
+    if ([selected isEqualToString:@"自定义…"]) {
+        NSString *custom = self.terminalAppCustom.stringValue;
+        if (custom.length > 0) cfg[@"terminalApp"] = custom;
+    } else if (selected) {
+        cfg[@"terminalApp"] = selected;
+    }
     [cfg writeToFile:ConfigPath() atomically:YES];
 }
 
@@ -234,6 +245,56 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
     NSView *card1 = [self card:@"右键菜单功能" content:featGrid];
     [root addSubview:card1];
 
+    // ── 卡片 1b：终端应用选择 ──
+    NSTextField *termLabel = [self label:@"终端应用：" size:13 bold:NO color:nil];
+    termLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.terminalAppPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.terminalAppPopup addItemsWithTitles:@[@"Terminal", @"iTerm", @"Warp", @"自定义…"]];
+    self.terminalAppPopup.target = self;
+    self.terminalAppPopup.action = @selector(terminalAppChanged:);
+    self.terminalAppPopup.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.terminalAppCustom = [NSTextField textFieldWithString:@""];
+    self.terminalAppCustom.placeholderString = @"输入应用名称（如 WezTerm）";
+    self.terminalAppCustom.font = [NSFont systemFontOfSize:13];
+    self.terminalAppCustom.enabled = NO;
+    self.terminalAppCustom.target = self;
+    self.terminalAppCustom.action = @selector(terminalAppCustomChanged:);
+    self.terminalAppCustom.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *termHint = [self label:@"选择后右键菜单将显示对应终端名称；选中的应用不存在时自动回退 Terminal"
+                                    size:11 bold:NO color:[NSColor tertiaryLabelColor]];
+    termHint.translatesAutoresizingMaskIntoConstraints = NO;
+    termHint.maximumNumberOfLines = 2;
+    termHint.preferredMaxLayoutWidth = 540;
+
+    NSView *termContent = [[NSView alloc] initWithFrame:NSZeroRect];
+    termContent.translatesAutoresizingMaskIntoConstraints = NO;
+    [termContent addSubview:termLabel];
+    [termContent addSubview:self.terminalAppPopup];
+    [termContent addSubview:self.terminalAppCustom];
+    [termContent addSubview:termHint];
+    [NSLayoutConstraint activateConstraints:@[
+        [termLabel.topAnchor constraintEqualToAnchor:termContent.topAnchor],
+        [termLabel.leadingAnchor constraintEqualToAnchor:termContent.leadingAnchor],
+
+        [self.terminalAppPopup.centerYAnchor constraintEqualToAnchor:termLabel.centerYAnchor],
+        [self.terminalAppPopup.leadingAnchor constraintEqualToAnchor:termLabel.trailingAnchor constant:8],
+        [self.terminalAppPopup.widthAnchor constraintEqualToConstant:120],
+
+        [self.terminalAppCustom.centerYAnchor constraintEqualToAnchor:termLabel.centerYAnchor],
+        [self.terminalAppCustom.leadingAnchor constraintEqualToAnchor:self.terminalAppPopup.trailingAnchor constant:8],
+        [self.terminalAppCustom.trailingAnchor constraintEqualToAnchor:termContent.trailingAnchor],
+
+        [termHint.topAnchor constraintEqualToAnchor:termLabel.bottomAnchor constant:6],
+        [termHint.leadingAnchor constraintEqualToAnchor:termContent.leadingAnchor],
+        [termHint.trailingAnchor constraintEqualToAnchor:termContent.trailingAnchor],
+        [termHint.bottomAnchor constraintEqualToAnchor:termContent.bottomAnchor],
+    ]];
+    NSView *card1b = [self card:@"终端应用偏好" content:termContent];
+    [root addSubview:card1b];
+
     // ── 卡片 2：新建文件类型（单行网格，列宽自适应，绝不重叠） ──
     NSMutableArray<NSArray<NSView *> *> *typeRow = [NSMutableArray array];
     for (NSArray *ft in @[@[@"文本文档 (.txt)", @"txt"], @[@"Markdown (.md)", @"md"],
@@ -309,7 +370,8 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
     NSMutableArray *cons = [NSMutableArray array];
     [cons addObjectsFromArray:@[
         [card1.topAnchor constraintEqualToAnchor:self.statusField.bottomAnchor constant:16],
-        [card2.topAnchor constraintEqualToAnchor:card1.bottomAnchor constant:14],
+        [card1b.topAnchor constraintEqualToAnchor:card1.bottomAnchor constant:14],
+        [card2.topAnchor constraintEqualToAnchor:card1b.bottomAnchor constant:14],
         [card3.topAnchor constraintEqualToAnchor:card2.bottomAnchor constant:14],
     ]];
     // 底部三按钮水平排列（等宽）
@@ -328,8 +390,8 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
         ]];
         bx += 202;
     }
-    // 三张卡片撑满宽度
-    for (NSView *card in @[card1, card2, card3]) {
+    // 四张卡片撑满宽度
+    for (NSView *card in @[card1, card1b, card2, card3]) {
         [cons addObjectsFromArray:@[
             [card.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
             [card.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
@@ -392,6 +454,18 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
         self.switches[k].state = [(NSNumber *)cfg[k] boolValue]
             ? NSControlStateValueOn : NSControlStateValueOff;
     }
+    // 同步终端应用选择
+    NSString *savedApp = cfg[@"terminalApp"] ?: @"Terminal";
+    NSArray *presetApps = @[@"Terminal", @"iTerm", @"Warp"];
+    if ([presetApps containsObject:savedApp]) {
+        [self.terminalAppPopup selectItemWithTitle:savedApp];
+        self.terminalAppCustom.enabled = NO;
+        self.terminalAppCustom.stringValue = @"";
+    } else {
+        [self.terminalAppPopup selectItemWithTitle:@"自定义…"];
+        self.terminalAppCustom.enabled = YES;
+        self.terminalAppCustom.stringValue = savedApp;
+    }
 }
 
 - (void)softRefresh
@@ -416,6 +490,22 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
 - (void)switchChanged:(NSButton *)sender
 {
     [self saveConfig];
+}
+
+- (void)terminalAppChanged:(NSPopUpButton *)sender
+{
+    NSString *selected = sender.titleOfSelectedItem;
+    self.terminalAppCustom.enabled = [selected isEqualToString:@"自定义…"];
+    if (!self.terminalAppCustom.enabled) {
+        [self saveConfig];
+    }
+}
+
+- (void)terminalAppCustomChanged:(NSTextField *)sender
+{
+    if (sender.stringValue.length > 0) {
+        [self saveConfig];
+    }
 }
 
 - (void)openExtSettings

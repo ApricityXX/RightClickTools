@@ -38,6 +38,14 @@ static BOOL featureEnabled(NSString *key)
     return v ? v.boolValue : [key isEqualToString:@"logging"] ? NO : YES;
 }
 
+// 返回配置的终端应用名称（key: terminalApp；默认 Terminal，零迁移成本）
+static NSString *terminalAppName(void)
+{
+    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:FeatureConfigPath()];
+    NSString *app = cfg[@"terminalApp"];
+    return (app.length > 0) ? app : @"Terminal";
+}
+
 // 日志超过 256KB 时自动截断保留尾部（每次右键建菜单时检查一次，开销可忽略）
 static void trimLogIfNeeded(void)
 {
@@ -267,9 +275,14 @@ static NSString *shq(NSString *s)
     }
 
     // —— 其余功能项（按功能开关过滤） ——
-    if (featureEnabled(@"terminal"))
-        [menu addItem:[self item:@"在此处打开终端" action:@selector(openTerminal:)
+    if (featureEnabled(@"terminal")) {
+        NSString *termApp = terminalAppName();
+        NSString *termTitle = [termApp isEqualToString:@"Terminal"]
+            ? @"在此处打开终端"
+            : [NSString stringWithFormat:@"在 %@ 中打开", termApp];
+        [menu addItem:[self item:termTitle action:@selector(openTerminal:)
                             icon:[RightClickSync symbolIcon:@"terminal"]]];
+    }
     if (featureEnabled(@"copyPath"))
         [menu addItem:[self item:@"复制文件路径" action:@selector(copyPath:)
                             icon:[RightClickSync symbolIcon:@"doc.on.doc"]]];
@@ -392,11 +405,20 @@ static NSString *shq(NSString *s)
 - (void)openTerminal:(NSMenuItem *)sender
 {
     NSURL *dir = [self targetDir];
-    rcLog([NSString stringWithFormat:@"[openTerminal] dir=%@", dir.path]);
     if (!dir) return;
-    [self runOutOfSandbox:[NSString stringWithFormat:@"/usr/bin/open -a Terminal %@\n",
-                           shq(dir.path)]
-                    label:@"openTerminal"];
+
+    NSString *configured = terminalAppName();
+    // 回退机制：如果配置的终端应用不存在，自动回退到 Terminal
+    // 利用 shell 的 || 短路：open -a <configured> 失败时执行 open -a Terminal
+    NSString *cmd;
+    if ([configured isEqualToString:@"Terminal"]) {
+        cmd = [NSString stringWithFormat:@"/usr/bin/open -a Terminal %@\n", shq(dir.path)];
+    } else {
+        cmd = [NSString stringWithFormat:@"/usr/bin/open -a %@ %@ 2>/dev/null || /usr/bin/open -a Terminal %@\n",
+               shq(configured), shq(dir.path), shq(dir.path)];
+    }
+    rcLog([NSString stringWithFormat:@"[openTerminal] app=%@ dir=%@", configured, dir.path]);
+    [self runOutOfSandbox:cmd label:@"openTerminal"];
 }
 
 #pragma mark - 3. 复制路径
