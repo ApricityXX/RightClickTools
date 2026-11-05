@@ -234,16 +234,28 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
     NSView *card1 = [self card:@"右键菜单功能" content:featGrid];
     [root addSubview:card1];
 
-    // ── 卡片 2：新建文件类型（单行网格，列宽自适应，绝不重叠） ──
-    NSMutableArray<NSArray<NSView *> *> *typeRow = [NSMutableArray array];
-    for (NSArray *ft in @[@[@"文本文档 (.txt)", @"txt"], @[@"Markdown (.md)", @"md"],
-                          @[@"Word (.docx)", @"docx"], @[@"Excel (.xlsx)", @"xlsx"],
-                          @[@"PPT (.pptx)", @"pptx"]]) {
-        [typeRow addObject:[self checkbox:ft[0] key:ft[1]]];
+    // ── 卡片 2：新建文件类型（两行网格，避免单行过宽导致右侧溢出） ──
+    NSArray *fileTypes = @[@[@"文本文档 (.txt)", @"txt"], @[@"Markdown (.md)", @"md"],
+                           @[@"Word (.docx)", @"docx"], @[@"Excel (.xlsx)", @"xlsx"],
+                           @[@"PPT (.pptx)", @"pptx"]];
+    NSMutableArray<NSArray<NSView *> *> *typeRows = [NSMutableArray array];
+    // 第一行：3个
+    NSMutableArray<NSView *> *row1 = [NSMutableArray array];
+    for (NSUInteger i = 0; i < 3 && i < fileTypes.count; i++) {
+        [row1 addObject:[self checkbox:fileTypes[i][0] key:fileTypes[i][1]]];
     }
-    NSGridView *typeGrid = [NSGridView gridViewWithViews:@[typeRow]];
+    [typeRows addObject:row1];
+    // 第二行：剩余2个
+    if (fileTypes.count > 3) {
+        NSMutableArray<NSView *> *row2 = [NSMutableArray array];
+        for (NSUInteger i = 3; i < fileTypes.count; i++) {
+            [row2 addObject:[self checkbox:fileTypes[i][0] key:fileTypes[i][1]]];
+        }
+        [typeRows addObject:row2];
+    }
+    NSGridView *typeGrid = [NSGridView gridViewWithViews:typeRows];
     typeGrid.rowSpacing = 8;
-    typeGrid.columnSpacing = 14;
+    typeGrid.columnSpacing = 20;
     typeGrid.translatesAutoresizingMaskIntoConstraints = NO;
     NSView *card2 = [self card:@"新建文件包含的类型" content:typeGrid];
     [root addSubview:card2];
