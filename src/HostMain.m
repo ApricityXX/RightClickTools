@@ -5,6 +5,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <FinderSync/FinderSync.h>
 #import <sys/stat.h>
+#import <unistd.h>
 
 #define EXT_BUNDLE_ID @"com.user.rightclicktools.RightClickToolsExt"
 
@@ -58,6 +59,24 @@ static NSString *runCmd(NSString *launchPath, NSArray<NSString *> *args)
     }
 }
 
+// 只看退出码的命令（校验签名、校验和时用，输出内容不可靠）
+static int runCmdStatus(NSString *launchPath, NSArray<NSString *> *args)
+{
+    NSTask *t = [NSTask new];
+    t.launchPath = launchPath;
+    t.arguments = args;
+    NSPipe *out = [NSPipe pipe];
+    t.standardOutput = out;
+    t.standardError = out;
+    @try {
+        [t launch];
+        [t waitUntilExit];
+        return t.terminationStatus;
+    } @catch (NSException *e) {
+        return -1;
+    }
+}
+
 // 追加一行到共享日志（扩展的 rc_log.txt，管理台日志页直接可见，排查授权问题用）
 static void appendLog(NSString *text)
 {
@@ -75,6 +94,160 @@ static void appendLog(NSString *text)
     [fh closeFile];
 }
 
+#pragma mark - 软件更新（检查 → 下载 → 校验 → 替换 → 重启，全程在 App 内完成）
+
+// 设计说明：
+//  · 版本信息以 GitHub Releases 为准。API 直连优先，国内网络不通时依次退到镜像、
+//    以及 Release 里的 update.json（CI 生成，走 releases/latest/download 永久链接）。
+//  · 下载资产优先官方直链，失败自动切 ghfast.top 镜像；SHA256SUMS.txt 必须校验通过才安装，
+//    避免装到半截包或被篡改的包。
+//  · 替换自己：宿主进程不能边运行边覆盖自己的 bundle，所以把「等待退出 → 替换 →
+//    重注册扩展 → 重启访达 → 打开新版」写进临时脚本，拉起脚本后立刻退出。
+//    重注册那两步是上次「覆盖安装后右键菜单消失」的修复，不能省。
+static NSString *const kRepo = @"ApricityXX/RightClickTools";
+static NSString *const kMirrorPrefix = @"https://ghfast.top/";
+
+static NSString *RCTCleanVersion(NSString *s)
+{
+    NSString *v = [s stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (v.length && [v.lowercaseString hasPrefix:@"v"]) v = [v substringFromIndex:1];
+    return v ?: @"";
+}
+
+// 逐段数字比较，支持 1.10 > 1.9、1.1 > 1.0.9
+static NSComparisonResult RCTCompareVersion(NSString *a, NSString *b)
+{
+    NSArray *xa = [RCTCleanVersion(a) componentsSeparatedByString:@"."];
+    NSArray *xb = [RCTCleanVersion(b) componentsSeparatedByString:@"."];
+    NSUInteger n = MAX(xa.count, xb.count);
+    for (NSUInteger i = 0; i < n; i++) {
+        NSInteger va = i < xa.count ? [xa[i] integerValue] : 0;
+        NSInteger vb = i < xb.count ? [xb[i] integerValue] : 0;
+        if (va != vb) return va > vb ? NSOrderedDescending : NSOrderedAscending;
+    }
+    return NSOrderedSame;
+}
+
+static NSString *RCTMirror(NSString *url)
+{
+    return [url hasPrefix:kMirrorPrefix] ? url
+         : [kMirrorPrefix stringByAppendingString:url];
+}
+
+// shell 单引号转义（路径里含中文和空格，直接拼会出事）
+static NSString *RCTShq(NSString *s)
+{
+    return [NSString stringWithFormat:@"'%@'",
+            [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
+}
+
+// JSON 里可能是 NSNull 或数字，统一安全转字符串
+static NSString *RCTString(id v)
+{
+    return [v isKindOfClass:NSString.class] ? v : @"";
+}
+
+static NSString *RCTCurrentVersion(void)
+{
+    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0";
+}
+
+// 顺序尝试多个 URL，第一个 2xx 且有数据就回调；全失败返回可读错误
+static void RCTFetchData(NSArray<NSString *> *urls, NSTimeInterval timeout,
+                         void (^done)(NSData *data, NSString *errMsg))
+{
+    done = [done copy];
+    if (!urls.count) {
+        done(nil, @"所有更新源都连不上，请检查网络后重试");
+        return;
+    }
+    NSMutableArray *rest = [urls mutableCopy];
+    NSString *first = rest.firstObject;
+    [rest removeObjectAtIndex:0];
+    NSMutableURLRequest *req = [NSMutableURLRequest
+        requestWithURL:[NSURL URLWithString:first]
+           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+       timeoutInterval:timeout];
+    [req setValue:@"RightClickTools-Updater" forHTTPHeaderField:@"User-Agent"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            NSInteger code = [(NSHTTPURLResponse *)r statusCode];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!e && code >= 200 && code < 300 && d.length) { done(d, nil); return; }
+                NSString *why = e ? e.localizedDescription
+                                  : [NSString stringWithFormat:@"HTTP %ld", (long)code];
+                RCTFetchData(rest, timeout, ^(NSData *d2, NSString *err2) {
+                    done(d2, err2 ?: why);
+                });
+            });
+        }];
+    [task resume];
+}
+
+@interface RCTFileDownloader : NSObject <NSURLSessionDownloadDelegate>
+@property(copy) NSString *destPath;
+@property(copy) void (^progress)(double frac);
+@property(copy) void (^done)(BOOL ok, NSError *error);
+@property(strong) NSURLSession *session;
+@property(strong) NSError *moveError;
+- (void)start:(NSURLRequest *)req;
+@end
+
+@implementation RCTFileDownloader
+
+- (void)start:(NSURLRequest *)req
+{
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    self.session = [NSURLSession sessionWithConfiguration:cfg
+                                                delegate:self
+                                           delegateQueue:[NSOperationQueue mainQueue]];
+    NSURLSessionDownloadTask *t = [self.session downloadTaskWithRequest:req];
+    t.taskDescription = self.destPath;
+    [t resume];
+}
+
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task
+      didWriteData:(int64_t)bytesWritten
+ totalBytesWritten:(int64_t)totalWritten
+totalBytesExpectedToWrite:(int64_t)totalExpected
+{
+    if (self.progress && totalExpected > 0)
+        self.progress((double)totalWritten / (double)totalExpected);
+}
+
+// 临时文件在 delegate 返回后即被系统回收，必须在这里搬走
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task
+didFinishDownloadingToURL:(NSURL *)location
+{
+    NSString *dest = task.taskDescription;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm removeItemAtPath:dest error:nil];
+    NSError *e = nil;
+    [fm moveItemAtURL:location toURL:[NSURL fileURLWithPath:dest] error:&e];
+    self.moveError = e;
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error
+{
+    // 关键：404/502 时 downloadTask 会把错误页面当成「下载成功」写进临时文件，
+    // 必须自己看 HTTP 状态码，否则会拿一个 HTML 当安装包去解压。
+    NSInteger code = [task.response isKindOfClass:NSHTTPURLResponse.class]
+        ? [(NSHTTPURLResponse *)task.response statusCode] : 200;
+    NSError *err = error ?: self.moveError;
+    if (!err && (code < 200 || code >= 300)) {
+        err = [NSError errorWithDomain:@"RCTUpdate" code:code userInfo:@{
+            NSLocalizedDescriptionKey: [NSString stringWithFormat:@"HTTP %ld", (long)code] }];
+        [[NSFileManager defaultManager] removeItemAtPath:self.destPath error:nil];
+    }
+    if (self.done) self.done(err == nil, err);
+    [session finishTasksAndInvalidate];
+}
+
+@end
+
 #pragma mark - AppDelegate
 
 // 本次启动是否由内部命令 URL 触发（true 时不显示管理台）
@@ -88,6 +261,10 @@ static BOOL gURLHandled = NO;
 @property(strong) NSTextField *termCustom;
 @property(strong) NSTextView *logView;
 @property(strong) NSTimer *timer;
+@property(strong) NSButton *updateButton;
+@property(strong) NSDictionary *pendingUpdate;   // 检查到的新版本信息
+@property(strong) RCTFileDownloader *downloader; // 持有下载 delegate，避免被 ARC 提前释放
+@property(assign) BOOL updateBusy;
 @end
 
 @implementation AppDelegate
@@ -434,14 +611,17 @@ static BOOL gURLHandled = NO;
     [root addSubview:card3];
 
     // ── 底部按钮 ──
+    // 四个等宽按钮：4×138 + 3×10 = 582，与卡片同宽，不会像旧的一行五列那样右侧溢出
     NSMutableArray<NSButton *> *btns = [NSMutableArray array];
     for (NSArray *b in @[@[@"打开扩展设置", @"openExtSettings"],
                          @[@"切换隐藏文件", @"toggleHidden"],
-                         @[@"重装功能脚本", @"reinstallHelper"]]) {
+                         @[@"重装功能脚本", @"reinstallHelper"],
+                         @[@"检查更新",     @"checkForUpdates"]]) {
         NSButton *btn = [NSButton buttonWithTitle:b[0] target:self action:NSSelectorFromString(b[1])];
         btn.bezelStyle = NSBezelStyleRounded;
         btn.translatesAutoresizingMaskIntoConstraints = NO;
         [btns addObject:btn];
+        if ([b[1] isEqualToString:@"checkForUpdates"]) self.updateButton = btn;
     }
 
     // ── 纵向串联所有区块 ──
@@ -451,7 +631,7 @@ static BOOL gURLHandled = NO;
         [card2.topAnchor constraintEqualToAnchor:card1.bottomAnchor constant:14],
         [card3.topAnchor constraintEqualToAnchor:card2.bottomAnchor constant:14],
     ]];
-    // 底部三按钮水平排列（等宽）
+    // 底部四按钮水平排列（等宽）
     CGFloat bx = 20;
     for (NSUInteger i = 0; i < btns.count; i++) {
         NSButton *btn = btns[i];
@@ -463,9 +643,9 @@ static BOOL gURLHandled = NO;
             [btn.topAnchor constraintEqualToAnchor:card3.bottomAnchor constant:16],
             bottomPin,
             [btn.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:bx],
-            [btn.widthAnchor constraintEqualToConstant:188],
+            [btn.widthAnchor constraintEqualToConstant:138],
         ]];
-        bx += 202;
+        bx += 148;
     }
     // 三张卡片撑满宽度
     for (NSView *card in @[card1, card2, card3]) {
@@ -576,7 +756,8 @@ static BOOL gURLHandled = NO;
 
 - (void)softRefresh
 {
-    self.statusField.stringValue = [self statusText];
+    // 更新流程进行中时，状态栏被借用来显示下载进度，别被 2 秒定时刷新覆盖掉
+    if (!self.updateBusy) self.statusField.stringValue = [self statusText];
     [self refreshLog];
 }
 
@@ -702,6 +883,354 @@ static BOOL gDidResetTCC = NO;    // 本次运行只清一次失效授权记录�
 {
     [@"" writeToFile:LogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     [self refreshLog];
+}
+
+#pragma mark - 软件更新
+
+- (void)setUpdateState:(NSString *)buttonTitle status:(NSString *)status busy:(BOOL)busy
+{
+    self.updateBusy = busy;
+    self.updateButton.enabled = !busy;
+    self.updateButton.title = buttonTitle;
+    self.statusField.stringValue = status;
+}
+
+- (void)updateFailed:(NSString *)msg
+{
+    appendLog([NSString stringWithFormat:@"[更新] 失败：%@", msg]);
+    NSString *title = self.pendingUpdate
+        ? [NSString stringWithFormat:@"更新到 v%@", self.pendingUpdate[@"version"]]
+        : @"检查更新";
+    [self setUpdateState:title status:[self statusText] busy:NO];
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = @"更新失败";
+    a.informativeText = msg;
+    [a addButtonWithTitle:@"知道了"];
+    [a runModal];
+}
+
+- (void)checkForUpdates
+{
+    if (self.updateBusy) return;
+    if (self.pendingUpdate) { [self confirmInstallUpdate]; return; }
+
+    [self setUpdateState:@"检查中…" status:@"正在检查更新…" busy:YES];
+    appendLog(@"[更新] 开始检查新版本");
+
+    NSString *api = [NSString stringWithFormat:
+        @"https://api.github.com/repos/%@/releases/latest", kRepo];
+    NSString *fallback = [NSString stringWithFormat:
+        @"https://github.com/%@/releases/latest/download/update.json", kRepo];
+    // API 直连 → API 镜像 → 最新版里的 update.json → 其镜像
+    NSArray *urls = @[api, RCTMirror(api), fallback, RCTMirror(fallback)];
+
+    __weak AppDelegate *weakSelf = self;
+    [self tryUpdateSources:urls completion:^(NSDictionary *info, NSString *errMsg) {
+        AppDelegate *me = weakSelf;
+        if (!me) return;
+        if (!info) { [me updateFailed:errMsg]; return; }
+        [me handleReleaseInfo:info];
+    }];
+}
+
+// 逐个源尝试：镜像偶尔会返回 200 但内容不是 JSON，不能把「解析失败」当成终点，
+// 否则后面可用的 update.json 兜底源就永远轮不到。
+- (void)tryUpdateSources:(NSArray<NSString *> *)urls
+              completion:(void (^)(NSDictionary *info, NSString *errMsg))completion
+{
+    completion = [completion copy];
+    if (!urls.count) {
+        completion(nil, @"所有更新源都连不上，或返回了无法解析的内容");
+        return;
+    }
+    NSMutableArray *rest = [urls mutableCopy];
+    NSString *first = rest.firstObject;
+    [rest removeObjectAtIndex:0];
+    __weak AppDelegate *weakSelf = self;
+    RCTFetchData(@[first], 15.0, ^(NSData *data, NSString *errMsg) {
+        AppDelegate *me = weakSelf;
+        if (!me) return;
+        NSDictionary *info = data ? [me parseReleaseData:data] : nil;
+        if (info) { completion(info, nil); return; }
+        [me tryUpdateSources:rest completion:completion];
+    });
+}
+
+// 兼容两种来源：GitHub Releases API（tag_name/body/assets）与 CI 生成的 update.json
+- (NSDictionary *)parseReleaseData:(NSData *)data
+{
+    NSDictionary *j = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![j isKindOfClass:NSDictionary.class]) return nil;
+
+    NSString *tag = nil, *version = nil, *notes = @"", *zip = nil, *sums = nil;
+    NSArray *zipURLs = nil, *sumsURLs = nil;
+
+    if (RCTString(j[@"tag_name"]).length) {
+        tag = RCTString(j[@"tag_name"]);
+        notes = RCTString(j[@"body"]);
+        // Release 正文后半段是安装步骤，弹窗里只展示变更内容
+        NSRange cut = [notes rangeOfString:@"\n---\n"];
+        if (cut.location != NSNotFound) notes = [notes substringToIndex:cut.location];
+        NSArray *assets = [j[@"assets"] isKindOfClass:NSArray.class] ? j[@"assets"] : @[];
+        for (NSDictionary *a in assets) {
+            if (![a isKindOfClass:NSDictionary.class]) continue;
+            NSString *n = RCTString(a[@"name"]);
+            NSString *u = RCTString(a[@"browser_download_url"]);
+            if (!u.length) continue;
+            if ([n hasSuffix:@"-arm64.zip"] && !zip) {
+                zip = n; zipURLs = @[u, RCTMirror(u)];
+            } else if ([n isEqualToString:@"SHA256SUMS.txt"] && !sums) {
+                sums = n; sumsURLs = @[u, RCTMirror(u)];
+            }
+        }
+    } else if (RCTString(j[@"version"]).length) {
+        version = RCTString(j[@"version"]);
+        tag = RCTString(j[@"tag"]);
+        if (!tag.length) tag = [@"v" stringByAppendingString:version];
+        notes = RCTString(j[@"notes"]);
+        zip = RCTString(j[@"zip"]);
+        sums = RCTString(j[@"sums"]);
+        zipURLs = [j[@"zip_urls"] isKindOfClass:NSArray.class] ? j[@"zip_urls"] : @[];
+        sumsURLs = [j[@"sums_urls"] isKindOfClass:NSArray.class] ? j[@"sums_urls"] : @[];
+    }
+    if (!tag.length || !zip.length || !zipURLs.count) return nil;
+    if (!version.length) version = RCTCleanVersion(tag);
+    if (!sums.length) sums = @"SHA256SUMS.txt";
+    return @{ @"version": version, @"tag": tag, @"notes": notes,
+              @"zip": zip, @"sums": sums,
+              @"zipURLs": zipURLs, @"sumsURLs": sumsURLs ?: @[] };
+}
+
+- (void)handleReleaseInfo:(NSDictionary *)info
+{
+    NSString *ver = info[@"version"];
+    if (RCTCompareVersion(ver, RCTCurrentVersion()) != NSOrderedDescending) {
+        [self setUpdateState:@"检查更新" status:[self statusText] busy:NO];
+        NSAlert *a = [[NSAlert alloc] init];
+        a.messageText = @"已是最新版本";
+        a.informativeText = [NSString stringWithFormat:
+            @"当前版本 v%@，没有可用的更新。", RCTCurrentVersion()];
+        [a addButtonWithTitle:@"知道了"];
+        [a runModal];
+        appendLog(@"[更新] 已是最新版本");
+        return;
+    }
+    self.pendingUpdate = info;
+    [self setUpdateState:[NSString stringWithFormat:@"更新到 v%@", ver]
+                  status:[NSString stringWithFormat:@"发现新版本 v%@（当前 v%@）",
+                          ver, RCTCurrentVersion()]
+                    busy:NO];
+    appendLog([NSString stringWithFormat:@"[更新] 发现新版本 v%@", ver]);
+    [self confirmInstallUpdate];
+}
+
+- (void)confirmInstallUpdate
+{
+    NSDictionary *info = self.pendingUpdate;
+    if (!info) return;
+    NSString *notes = RCTString(info[@"notes"]);
+    if (notes.length > 1200)
+        notes = [[notes substringToIndex:1200] stringByAppendingString:@"\n…（更多内容见 Release 页面）"];
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = [NSString stringWithFormat:@"发现新版本 v%@", info[@"version"]];
+    a.informativeText = [NSString stringWithFormat:
+        @"当前版本 v%@\n\n%@\n\n点击「下载并安装」后会自动下载、校验并替换应用，完成时会自动重启。",
+        RCTCurrentVersion(), notes];
+    [a addButtonWithTitle:@"下载并安装"];
+    [a addButtonWithTitle:@"稍后"];
+    if ([a runModal] == NSAlertFirstButtonReturn) [self startInstallUpdate];
+}
+
+// 顺序尝试多个下载源，带进度回调
+- (void)downloadFrom:(NSMutableArray<NSString *> *)candidates to:(NSString *)dest
+             timeout:(NSTimeInterval)timeout
+            progress:(void (^)(double))progress
+          completion:(void (^)(BOOL ok, NSString *msg))completion
+{
+    progress = [progress copy];
+    completion = [completion copy];
+    if (!candidates.count) { completion(NO, @"所有下载源都不可用"); return; }
+    NSString *url = RCTString(candidates.firstObject);
+    [candidates removeObjectAtIndex:0];
+    if (!url.length) { [self downloadFrom:candidates to:dest timeout:timeout
+                                 progress:progress completion:completion]; return; }
+
+    NSMutableURLRequest *req = [NSMutableURLRequest
+        requestWithURL:[NSURL URLWithString:url]
+           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+       timeoutInterval:timeout];
+    [req setValue:@"RightClickTools-Updater" forHTTPHeaderField:@"User-Agent"];
+
+    RCTFileDownloader *d = [RCTFileDownloader new];
+    d.destPath = dest;
+    d.progress = progress;
+    __weak AppDelegate *weakSelf = self;
+    d.done = ^(BOOL ok, NSError *err) {
+        AppDelegate *me = weakSelf;
+        if (!me) return;
+        if (ok) { completion(YES, nil); return; }
+        appendLog([NSString stringWithFormat:@"[更新] 下载源失败 %@（%@）",
+                   url, err.localizedDescription]);
+        [me downloadFrom:candidates to:dest timeout:timeout
+                progress:progress completion:completion];
+    };
+    self.downloader = d;   // 必须持有，delegate 被释放会导致下载静默中断
+    [d start:req];
+}
+
+- (void)startInstallUpdate
+{
+    NSDictionary *info = self.pendingUpdate;
+    if (!info || self.updateBusy) return;
+
+#if !defined(__arm64__)
+    NSAlert *arch = [[NSAlert alloc] init];
+    arch.messageText = @"官方安装包仅支持 Apple Silicon";
+    arch.informativeText = @"当前是 Intel 构建，官方 Release 只提供 arm64 包。请按 README「方式三」自行编译。";
+    [arch addButtonWithTitle:@"知道了"];
+    [arch runModal];
+    return;
+#endif
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:
+        @"Library/Caches/com.user.rightclicktools/Update"];
+    [fm removeItemAtPath:dir error:nil];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    NSString *zipPath  = [dir stringByAppendingPathComponent:info[@"zip"]];
+    NSString *sumsPath = [dir stringByAppendingPathComponent:info[@"sums"]];
+    [self setUpdateState:@"下载中…" status:@"正在下载新版本…" busy:YES];
+    appendLog([NSString stringWithFormat:@"[更新] 开始下载 v%@", info[@"version"]]);
+
+    __weak AppDelegate *weakSelf = self;
+    [self downloadFrom:[info[@"zipURLs"] mutableCopy] to:zipPath timeout:180
+              progress:^(double frac) {
+                  AppDelegate *me = weakSelf;
+                  int pct = (int)(frac * 100);
+                  me.updateButton.title = [NSString stringWithFormat:@"下载 %d%%", pct];
+                  me.statusField.stringValue =
+                      [NSString stringWithFormat:@"正在下载新版本… %d%%", pct];
+              }
+            completion:^(BOOL ok, NSString *msg) {
+                AppDelegate *me = weakSelf;
+                if (!me) return;
+                if (!ok) { [me updateFailed:[@"下载失败：" stringByAppendingString:msg]]; return; }
+                [me setUpdateState:@"校验中…" status:@"正在下载校验文件…" busy:YES];
+                [me downloadFrom:[info[@"sumsURLs"] mutableCopy] to:sumsPath timeout:60
+                        progress:nil
+                      completion:^(BOOL ok2, NSString *msg2) {
+                          if (!ok2) {
+                              [me updateFailed:[@"校验文件下载失败：" stringByAppendingString:msg2]];
+                              return;
+                          }
+                          [me verifyAndInstallAtDir:dir info:info];
+                      }];
+            }];
+}
+
+- (void)verifyAndInstallAtDir:(NSString *)dir info:(NSDictionary *)info
+{
+    [self setUpdateState:@"校验中…" status:@"正在校验安装包…" busy:YES];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *zip  = [dir stringByAppendingPathComponent:info[@"zip"]];
+    NSString *sums = [dir stringByAppendingPathComponent:info[@"sums"]];
+
+    // shasum -c 依赖文件名，必须在 zip 所在目录执行
+    NSString *check = [NSString stringWithFormat:@"cd %@ && /usr/bin/shasum -a 256 -c %@",
+                       RCTShq(dir), RCTShq(sums.lastPathComponent)];
+    NSString *out = runCmd(@"/bin/bash", @[@"-c", check]);
+    if ([out rangeOfString:@"OK"].location == NSNotFound ||
+        [out rangeOfString:@"FAILED"].location != NSNotFound) {
+        [self updateFailed:[NSString stringWithFormat:
+            @"安装包 SHA256 校验未通过，已中止安装。\n%@", out]];
+        return;
+    }
+
+    NSString *unzipDir = [dir stringByAppendingPathComponent:@"unzipped"];
+    [fm removeItemAtPath:unzipDir error:nil];
+    runCmd(@"/usr/bin/ditto", @[@"-x", @"-k", zip, unzipDir]);
+
+    NSString *newApp = [unzipDir stringByAppendingPathComponent:@"右键工具箱.app"];
+    if (![fm fileExistsAtPath:newApp]) {
+        for (NSString *p in [fm enumeratorAtPath:unzipDir]) {
+            if ([p.pathExtension isEqualToString:@"app"]) {
+                newApp = [unzipDir stringByAppendingPathComponent:p];
+                break;
+            }
+        }
+    }
+    if (![fm fileExistsAtPath:newApp]) {
+        [self updateFailed:@"安装包解压后找不到「右键工具箱.app」"];
+        return;
+    }
+
+    NSString *v = [runCmd(@"/usr/libexec/PlistBuddy",
+                          @[@"-c", @"Print :CFBundleShortVersionString",
+                            [newApp stringByAppendingPathComponent:@"Contents/Info.plist"]])
+                   stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (![v isEqualToString:info[@"version"]]) {
+        [self updateFailed:[NSString stringWithFormat:
+            @"安装包版本不符（包内 v%@，期望 v%@）", v, info[@"version"]]];
+        return;
+    }
+    if (runCmdStatus(@"/usr/bin/codesign", @[@"--verify", newApp]) != 0) {
+        [self updateFailed:@"安装包签名校验失败，已中止安装"];
+        return;
+    }
+
+    [self setUpdateState:@"安装中…" status:@"正在安装，应用即将自动重启…" busy:YES];
+    [self launchInstallScriptFor:newApp workDir:dir info:info];
+}
+
+// 不能在运行中覆盖自己的 bundle：交给独立脚本，等本进程退出后替换并重新打开
+- (void)launchInstallScriptFor:(NSString *)newApp workDir:(NSString *)dir info:(NSDictionary *)info
+{
+    NSString *app = [[NSBundle mainBundle] bundlePath];
+    NSString *script = [dir stringByAppendingPathComponent:@"do_update.sh"];
+    NSString *body = [NSString stringWithFormat:
+        @"#!/bin/bash\n"
+        "export LANG=en_US.UTF-8\n"
+        "OLDPID=%d\n"
+        "APP=%@\n"
+        "SRC=%@\n"
+        "LOG=%@\n"
+        "for i in $(seq 1 50); do kill -0 \"$OLDPID\" 2>/dev/null || break; sleep 0.2; done\n"
+        "sleep 0.3\n"
+        "/usr/bin/xattr -dr com.apple.quarantine \"$SRC\" 2>/dev/null\n"
+        "/usr/bin/pkill -f 'RightClickToolsExt.appex/Contents/MacOS/RightClickToolsExt' 2>/dev/null\n"
+        "/bin/rm -rf \"$APP\"\n"
+        "/bin/cp -R \"$SRC\" \"$APP\"\n"
+        "if [ ! -d \"$APP/Contents\" ]; then\n"
+        "  echo \"[管理台] 更新失败：无法写入 $APP，请手动替换\" >> \"$LOG\"\n"
+        "  /usr/bin/open %@\n"
+        "  exit 1\n"
+        "fi\n"
+        "/usr/bin/xattr -dr com.apple.quarantine \"$APP\" 2>/dev/null\n"
+        "LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister\n"
+        "\"$LSREG\" -f \"$APP\" 2>/dev/null\n"
+        "/usr/bin/pluginkit -a \"$APP/Contents/PlugIns/RightClickToolsExt.appex\" 2>/dev/null\n"
+        "/usr/bin/killall Finder 2>/dev/null\n"
+        "echo \"[管理台] 已更新到 v%@\" >> \"$LOG\"\n"
+        "/usr/bin/open \"$APP\"\n",
+        getpid(), RCTShq(app), RCTShq(newApp), RCTShq(LogPath()),
+        RCTShq(newApp), info[@"version"]];
+    [body writeToFile:script atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    chmod(script.UTF8String, 0755);
+
+    NSTask *t = [NSTask new];
+    t.launchPath = @"/bin/bash";
+    t.arguments = @[script];
+    @try {
+        [t launch];
+    } @catch (NSException *e) {
+        [self updateFailed:[NSString stringWithFormat:@"无法启动安装脚本：%@", e.reason]];
+        return;
+    }
+    appendLog([NSString stringWithFormat:@"[更新] 已启动安装脚本，即将重启到 v%@",
+               info[@"version"]]);
+    [NSApp terminate:nil];
 }
 
 @end
