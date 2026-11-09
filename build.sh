@@ -31,6 +31,7 @@ clang -arch "$ARCH" -mmacosx-version-min="$MACOS_MIN" -O2 -fobjc-arc -isysroot "
   "$ROOT/src/HostMain.m" -o "$APP/Contents/MacOS/RightClickTools"
 cp "$ROOT/resources/Host-Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/resources/helper.sh" "$APP/Contents/Resources/"
+chmod 755 "$APP/Contents/Resources/helper.sh"   # 仓库里可能是 644，产物必须可执行
 cp "$ROOT/resources/AppIcon.icns" "$APP/Contents/Resources/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
