@@ -74,30 +74,74 @@ jobs:
           echo "zip=RightClickTools-${VER}-arm64.zip" >> "$GITHUB_OUTPUT"
           cat SHA256SUMS.txt
 
+      # Release 说明按版本从 CHANGELOG 提取，避免每个版本都顶着同一段固定文案；
+      # 同时产出 update.json，供客户端在 GitHub API 不通时仍能检查到新版本。
+      - name: 生成 Release 说明与 update.json
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          python3 - "$VER" <<'PY'
+          import json, pathlib, re, sys
+
+          ver = sys.argv[1]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          m = re.search(r"^## v" + re.escape(ver) + r"[^\n]*\n(.*?)(?=^## |\Z)",
+                        text, re.M | re.S)
+          section = m.group(1).strip() if m else ""
+          section = re.sub(r"\n---\s*$", "", section).strip()
+          if not section:
+              section = "（本次更新暂无详细条目，请查看提交记录）"
+
+          zip_name = f"RightClickTools-{ver}-arm64.zip"
+          base = f"https://github.com/ApricityXX/RightClickTools/releases/download/v{ver}"
+          mirror = "https://ghfast.top/"
+          zip_urls = [f"{base}/{zip_name}", mirror + f"{base}/{zip_name}"]
+          sums_urls = [f"{base}/SHA256SUMS.txt", mirror + f"{base}/SHA256SUMS.txt"]
+
+          body = f"""## 右键工具箱 v{ver}
+
+          {section}
+
+          ---
+
+          **系统要求**：macOS 13+ / Apple Silicon（arm64）
+
+          ### 安装
+
+          1. 下载下方 `{zip_name}`，解压后把「右键工具箱.app」拖到 `/Applications`
+          2. 首次打开前解除隔离：
+             ```bash
+             xattr -dr com.apple.quarantine "/Applications/右键工具箱.app"
+             open "/Applications/右键工具箱.app"
+             ```
+          3. 在「系统设置 → 通用 → 登录项与扩展 → 访达扩展」中勾选「右键工具箱」
+
+          > 已装旧版无需手动下载：打开管理台点「检查更新」→「下载并安装」即可自动升级。
+          >
+          > 校验完整性：`shasum -a 256 -c SHA256SUMS.txt`
+          """
+          pathlib.Path("build/release_notes.md").write_text(body, encoding="utf-8")
+          info = {
+              "version": ver,
+              "tag": f"v{ver}",
+              "notes": section,
+              "zip": zip_name,
+              "sums": "SHA256SUMS.txt",
+              "zip_urls": zip_urls,
+              "sums_urls": sums_urls,
+          }
+          pathlib.Path("build/update.json").write_text(
+              json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+          print(body)
+          PY
+
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
           name: 右键工具箱 ${{ github.ref_name }}
-          body: |
-            ## 右键工具箱 ${{ github.ref_name }}
-
-            **系统要求**：macOS 13+ / Apple Silicon（arm64）
-
-            ### 安装
-            1. 下载下方 `RightClickTools-*-arm64.zip`，解压后把「右键工具箱.app」拖到 `/Applications`
-            2. 首次打开前先解除隔离（未公证的应用会被 Gatekeeper 拦截）：
-               ```bash
-               xattr -dr com.apple.quarantine "/Applications/右键工具箱.app"
-               open "/Applications/右键工具箱.app"
-               ```
-            3. 在「系统设置 → 通用 → 登录项与扩展 → 访达扩展」中勾选「右键工具箱」
-            4. 任意文件夹空白处右键即可看到菜单
-
-            > 也可以在 GitHub 网页右上角 Code → Codespaces 里直接跑，或用仓库 README 顶部的 AI 提示词让 AI 帮你装。
-            >
-            > 校验下载完整性：`shasum -a 256 -c SHA256SUMS.txt`
+          body_path: build/release_notes.md
           files: |
             build/${{ steps.pack.outputs.zip }}
             build/SHA256SUMS.txt
+            build/update.json
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
